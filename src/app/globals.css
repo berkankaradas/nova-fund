@@ -1,13 +1,35 @@
+/* --- GLOBAL STİLLER --- */
+/* Tailwind CSS temel katmanları ve özel animasyonlar */
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-:root {
-  --background: #05050A;
-  --foreground: #ffffff;
+/* Özel scrollbar stili */
+::-webkit-scrollbar {
+  width: 6px;
 }
 
-body {
-  background-color: var(--background);
-  color: var(--foreground);
+::-webkit-scrollbar-track {
+  background: #05050A;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(168, 85, 247, 0.3);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(168, 85, 247, 0.5);
+}
+
+/* Smooth scroll */
+html {
+  scroll-behavior: smooth;
+}
+
+/* Selection rengi */
+::selection {
+  background: rgba(168, 85, 247, 0.3);
+  color: white;
 }

@@ -1,107 +1,192 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol, token};
 
-// Kampanya verilerini saklamak için anahtarlar
+// ============================================================
+// NovaFund — Merkeziyetsiz Bağış Toplama Kontratı
+// ============================================================
+// Stellar Soroban üzerinde çoklu kampanya desteği sunan
+// crowdfunding akıllı kontratı.
+//
+// Fonksiyonlar:
+//   1. initialize    — Kontratı başlat, admin ata
+//   2. create_campaign — Yeni kampanya oluştur
+//   3. donate         — Kampanyaya bağış yap (XLM)
+//   4. get_campaign   — Tek kampanya bilgisi
+//   5. get_all_campaigns — Tüm kampanyaları listele
+// ============================================================
+
+use soroban_sdk::{
+    contract, contractimpl, contracttype,
+    Address, Env, String, Vec,
+};
+
+// ─── VERİ YAPILARI ──────────────────────────────────────────
+
+/// Kampanya bilgilerini tutan yapı
+#[contracttype]
+#[derive(Clone)]
+pub struct Campaign {
+    pub id: u32,            // Benzersiz kampanya kimliği
+    pub creator: Address,   // Kampanyayı oluşturan kişi
+    pub title: String,      // Kampanya başlığı
+    pub target: i128,       // Hedef miktar (stroop cinsinden, 1 XLM = 10^7 stroop)
+    pub raised: i128,       // Toplanan miktar
+}
+
+/// Kontrat storage anahtarları
 #[contracttype]
 pub enum DataKey {
-    Recipient,  // Kampanya sahibi (Parayı alacak kişi)
-    Deadline,   // Bitiş zamanı
-    Target,     // Hedef miktar
-    Raised,     // Toplanan miktar
-    Token,      // Kabul edilen token (örn: XLM)
-    State,      // Kampanya durumu (Aktif/Bitti)
+    Admin,              // Instance: Kontrat yöneticisi (Address)
+    CampaignCount,      // Instance: Toplam kampanya sayısı (u32)
+    Campaign(u32),      // Persistent: Kampanya verisi (Campaign)
 }
+
+// ─── KONTRAT ────────────────────────────────────────────────
 
 #[contract]
 pub struct NovaFundContract;
 
 #[contractimpl]
 impl NovaFundContract {
-    
-    // 1. KAMPANYAYI BAŞLATMA (INITIALIZE)
-    // Bu fonksiyon kontrat deploy edildiğinde bir kez çağrılır.
-    pub fn initialize(
-        e: Env, 
-        recipient: Address, 
-        token: Address, 
-        deadline: u64, 
-        target: i128
-    ) {
-        // Zaten başlatılmışsa hata ver (güvenlik)
-        if e.storage().instance().has(&DataKey::Recipient) {
-            panic!("Kampanya zaten başlatılmış!");
+
+    // ═══════════════════════════════════════════════════════
+    // 1. BAŞLATMA (INITIALIZE)
+    // ═══════════════════════════════════════════════════════
+    // Kontrat deploy edildikten sonra bir kez çağrılır.
+    // Admin adresini ve kampanya sayacını sıfırlar.
+    pub fn initialize(env: Env, admin: Address) {
+        // Güvenlik: Zaten başlatılmışsa hata ver
+        if env.storage().instance().has(&DataKey::Admin) {
+            panic!("Kontrat zaten başlatılmış!");
         }
 
-        // Verileri kaydet
-        e.storage().instance().set(&DataKey::Recipient, &recipient);
-        e.storage().instance().set(&DataKey::Token, &token);
-        e.storage().instance().set(&DataKey::Deadline, &deadline);
-        e.storage().instance().set(&DataKey::Target, &target);
-        e.storage().instance().set(&DataKey::Raised, &0_i128); // Başlangıçta 0 toplandı
+        // Admin adresinin işlemi onaylaması gerekiyor
+        admin.require_auth();
+
+        // Admin'i kaydet
+        env.storage().instance().set(&DataKey::Admin, &admin);
+
+        // Kampanya sayacını sıfırla
+        env.storage().instance().set(&DataKey::CampaignCount, &0_u32);
     }
 
-    // 2. BAĞIŞ YAPMA (DONATE)
-    // Kullanıcı bu fonksiyonu çağırarak kontrata para gönderir.
-    pub fn donate(e: Env, donor: Address, amount: i128) {
-        // 1. Kontrol: Bağış yapanın imzası (auth) var mı?
+    // ═══════════════════════════════════════════════════════
+    // 2. KAMPANYA OLUŞTURMA (CREATE CAMPAIGN)
+    // ═══════════════════════════════════════════════════════
+    // Herkes yeni bir kampanya oluşturabilir.
+    // Otomatik artan ID atanır; hedef stroop cinsindendir.
+    pub fn create_campaign(
+        env: Env,
+        creator: Address,
+        title: String,
+        target: i128,
+    ) -> u32 {
+        // Oluşturucunun imzasını doğrula
+        creator.require_auth();
+
+        // Hedef pozitif olmalı
+        if target <= 0 {
+            panic!("Hedef miktar sıfırdan büyük olmalı!");
+        }
+
+        // Mevcut sayacı al ve bir artır
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::CampaignCount)
+            .unwrap_or(0);
+
+        let new_id = count + 1;
+
+        // Yeni kampanya oluştur
+        let campaign = Campaign {
+            id: new_id,
+            creator,
+            title,
+            target,
+            raised: 0,
+        };
+
+        // Kampanyayı persistent storage'a kaydet
+        env.storage()
+            .persistent()
+            .set(&DataKey::Campaign(new_id), &campaign);
+
+        // Sayacı güncelle
+        env.storage()
+            .instance()
+            .set(&DataKey::CampaignCount, &new_id);
+
+        // Oluşturulan kampanya ID'sini döndür
+        new_id
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // 3. BAĞIŞ YAPMA (DONATE)
+    // ═══════════════════════════════════════════════════════
+    // Belirtilen kampanyaya bağış yapar.
+    // Miktar doğrudan kampanyanın "raised" alanına eklenir.
+    // Not: Token transferi Step 4'te eklenecek.
+    pub fn donate(env: Env, campaign_id: u32, donor: Address, amount: i128) {
+        // Bağış yapanın imzasını doğrula
         donor.require_auth();
 
-        // 2. Kontrol: Süre doldu mu?
-        let deadline: u64 = e.storage().instance().get(&DataKey::Deadline).unwrap();
-        if e.ledger().timestamp() > deadline {
-            panic!("Kampanya süresi doldu!");
+        // Miktar pozitif olmalı
+        if amount <= 0 {
+            panic!("Bağış miktarı sıfırdan büyük olmalı!");
         }
 
-        // 3. Transfer İşlemi: Kullanıcıdan -> Kontrata
-        let token_addr: Address = e.storage().instance().get(&DataKey::Token).unwrap();
-        let client = token::Client::new(&e, &token_addr);
-        
-        // Parayı kontratın adresine (current_contract_address) çek
-        client.transfer(&donor, &e.current_contract_address(), &amount);
+        // Kampanyayı getir
+        let key = DataKey::Campaign(campaign_id);
+        let mut campaign: Campaign = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic!("Kampanya bulunamadı!"));
 
-        // 4. Toplanan miktarı güncelle
-        let mut raised: i128 = e.storage().instance().get(&DataKey::Raised).unwrap();
-        raised += amount;
-        e.storage().instance().set(&DataKey::Raised, &raised);
+        // Toplanan miktarı güncelle
+        campaign.raised += amount;
+
+        // Güncellenmiş kampanyayı kaydet
+        env.storage().persistent().set(&key, &campaign);
     }
 
-    // 3. DURUM SORGULAMA (GET STATE)
-    // Frontend'in kampanya durumunu görmesi için
-    pub fn get_campaign_info(e: Env) -> (i128, i128, u64) {
-        let raised: i128 = e.storage().instance().get(&DataKey::Raised).unwrap_or(0);
-        let target: i128 = e.storage().instance().get(&DataKey::Target).unwrap_or(0);
-        let deadline: u64 = e.storage().instance().get(&DataKey::Deadline).unwrap_or(0);
-        
-        (raised, target, deadline)
+    // ═══════════════════════════════════════════════════════
+    // 4. TEK KAMPANYA SORGULAMA (GET CAMPAIGN)
+    // ═══════════════════════════════════════════════════════
+    // Verilen ID'ye sahip kampanyanın bilgilerini döndürür.
+    pub fn get_campaign(env: Env, campaign_id: u32) -> Campaign {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Campaign(campaign_id))
+            .unwrap_or_else(|| panic!("Kampanya bulunamadı!"))
     }
 
-    // 4. FONLARI ÇEKME (WITHDRAW)
-    // Sadece kampanya sahibi çekebilir
-    pub fn withdraw(e: Env) {
-        let recipient: Address = e.storage().instance().get(&DataKey::Recipient).unwrap();
-        
-        // Sadece alıcı (recipient) bu işlemi yapabilir
-        recipient.require_auth();
+    // ═══════════════════════════════════════════════════════
+    // 5. TÜM KAMPANYALARI LİSTELEME (GET ALL CAMPAIGNS)
+    // ═══════════════════════════════════════════════════════
+    // Tüm kayıtlı kampanyaları Vec olarak döndürür.
+    pub fn get_all_campaigns(env: Env) -> Vec<Campaign> {
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::CampaignCount)
+            .unwrap_or(0);
 
-        // Süre kontrolü: Deadline dolmadan çekilemez
-        let deadline: u64 = e.storage().instance().get(&DataKey::Deadline).unwrap();
-        if e.ledger().timestamp() < deadline {
-            panic!("Kampanya süresi henüz dolmadı!");
+        let mut campaigns = Vec::new(&env);
+
+        // 1'den başlayarak tüm kampanyaları topla
+        let mut i: u32 = 1;
+        while i <= count {
+            if let Some(campaign) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, Campaign>(&DataKey::Campaign(i))
+            {
+                campaigns.push_back(campaign);
+            }
+            i += 1;
         }
 
-        // Hedef kontrolü: Target'a ulaşılmadan çekilemez
-        let raised: i128 = e.storage().instance().get(&DataKey::Raised).unwrap();
-        let target: i128 = e.storage().instance().get(&DataKey::Target).unwrap();
-        if raised < target {
-            panic!("Hedef miktara ulaşılmadı!");
-        }
-
-        // Mevcut bakiyeyi kontrol et
-        let token_addr: Address = e.storage().instance().get(&DataKey::Token).unwrap();
-        let client = token::Client::new(&e, &token_addr);
-        let balance = client.balance(&e.current_contract_address());
-
-        // Parayı alıcıya transfer et
-        client.transfer(&e.current_contract_address(), &recipient, &balance);
+        campaigns
     }
 }

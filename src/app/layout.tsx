@@ -1,14 +1,17 @@
 import type { Metadata } from "next";
 import { Space_Grotesk } from "next/font/google";
 import "./globals.css";
-// Yeni import:
-import { WalletProvider } from "@/context/WalletContext"; 
+import { WalletProvider } from "@/context/WalletContext";
+
+// --- ANA LAYOUT ---
+// Tüm sayfaları saran kök bileşen.
+// Step 2: WalletProvider ile sarmalandı — cüzdan durumu tüm uygulamada erişilebilir.
 
 const spaceGrotesk = Space_Grotesk({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
   title: "NovaFund | Stellar Crowdfunding",
-  description: "Decentralized crowdfunding platform on Stellar",
+  description: "Merkeziyetsiz bağış toplama platformu — Stellar Soroban üzerinde.",
 };
 
 export default function RootLayout({
@@ -17,9 +20,9 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    <html lang="tr">
       <body className={`${spaceGrotesk.className} antialiased`}>
-        {/* Tüm siteyi WalletProvider ile sarmalıyoruz */}
+        {/* Tüm uygulamayı WalletProvider ile sarmalıyoruz */}
         <WalletProvider>
           {children}
         </WalletProvider>
