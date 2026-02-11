@@ -1,4 +1,4 @@
-import { Rocket, Github, Twitter } from "lucide-react";
+import { Rocket, Github, Linkedin } from "lucide-react";
 import Link from "next/link";
 
 // --- FOOTER BİLEŞENİ ---
@@ -41,7 +41,7 @@ export default function Footer() {
           {/* Sosyal Medya */}
           <div className="flex items-center gap-4">
             <a
-              href="https://github.com"
+              href="https://github.com/berkankaradas"
               target="_blank"
               rel="noopener noreferrer"
               className="p-2 text-gray-500 hover:text-white bg-white/5 rounded-lg border border-white/5 hover:border-white/10 transition-all"
@@ -49,12 +49,12 @@ export default function Footer() {
               <Github className="w-5 h-5" />
             </a>
             <a
-              href="https://twitter.com"
+              href="https://linkedin.com/in/berkankaradas"
               target="_blank"
               rel="noopener noreferrer"
               className="p-2 text-gray-500 hover:text-white bg-white/5 rounded-lg border border-white/5 hover:border-white/10 transition-all"
             >
-              <Twitter className="w-5 h-5" />
+              <Linkedin className="w-5 h-5" />
             </a>
           </div>
         </div>
