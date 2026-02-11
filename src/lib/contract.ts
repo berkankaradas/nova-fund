@@ -17,7 +17,7 @@ import {
     Address,
     xdr,
 } from "@stellar/stellar-sdk";
-import { Server, Api, assembleTransaction } from "@stellar/stellar-sdk/rpc";
+import { Server, Api } from "@stellar/stellar-sdk/rpc";
 import { signTransaction } from "@stellar/freighter-api";
 import { CONTRACT_ID, RPC_URL, NETWORK_PASSPHRASE } from "../constants";
 
@@ -135,14 +135,8 @@ export async function createCampaign(
             .setTimeout(60)
             .build();
 
-        // Simüle et → hazırla → imzalat → gönder
-        const simulated = await server.simulateTransaction(tx);
-        if (!Api.isSimulationSuccess(simulated)) {
-            console.error("Simülasyon başarısız:", simulated);
-            return false;
-        }
-
-        const prepared = assembleTransaction(tx, simulated).build();
+        // Hazırla (simulate + assemble) → imzalat → gönder
+        const prepared = await server.prepareTransaction(tx);
 
         const signedXdr = await signTransaction(prepared.toXDR(), {
             networkPassphrase: NETWORK_PASSPHRASE,
@@ -190,13 +184,8 @@ export async function donate(
             .setTimeout(60)
             .build();
 
-        const simulated = await server.simulateTransaction(tx);
-        if (!Api.isSimulationSuccess(simulated)) {
-            console.error("Simülasyon başarısız:", simulated);
-            return false;
-        }
-
-        const prepared = assembleTransaction(tx, simulated).build();
+        // Hazırla (simulate + assemble) → imzalat → gönder
+        const prepared = await server.prepareTransaction(tx);
 
         const signedXdr = await signTransaction(prepared.toXDR(), {
             networkPassphrase: NETWORK_PASSPHRASE,
