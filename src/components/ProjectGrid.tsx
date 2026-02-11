@@ -64,18 +64,19 @@ const MOCK_PROJECTS = [
     },
 ];
 
-// İkon ve görsel eşleştirme (kampanya ID'sine göre)
-const VISUAL_MAP: Record<number, { icon: typeof Leaf; color: string; bgGradient: string; borderHover: string; category: string }> = {
-    1: { icon: Leaf, color: "text-green-400", bgGradient: "from-green-500/20 to-emerald-900/20", borderHover: "hover:border-green-500/40", category: "Çevre" },
-    2: { icon: Shield, color: "text-blue-400", bgGradient: "from-blue-500/20 to-indigo-900/20", borderHover: "hover:border-blue-500/40", category: "Güvenlik" },
-    3: { icon: Gamepad2, color: "text-orange-400", bgGradient: "from-orange-500/20 to-red-900/20", borderHover: "hover:border-orange-500/40", category: "Oyun" },
-    4: { icon: Cpu, color: "text-purple-400", bgGradient: "from-purple-500/20 to-violet-900/20", borderHover: "hover:border-purple-500/40", category: "Teknoloji" },
-    5: { icon: Heart, color: "text-pink-400", bgGradient: "from-pink-500/20 to-rose-900/20", borderHover: "hover:border-pink-500/40", category: "Sağlık" },
-    6: { icon: Globe, color: "text-cyan-400", bgGradient: "from-cyan-500/20 to-teal-900/20", borderHover: "hover:border-cyan-500/40", category: "Eğitim" },
+
+// İkon, görsel ve açıklama eşleştirme (kampanya ID’sine göre)
+const VISUAL_MAP: Record<number, { icon: typeof Leaf; color: string; bgGradient: string; borderHover: string; category: string; description: string }> = {
+    1: { icon: Leaf, color: "text-green-400", bgGradient: "from-green-500/20 to-emerald-900/20", borderHover: "hover:border-green-500/40", category: "Çevre", description: "Yapay zeka destekli dronlar ile otomatik ağaçlandırma projesi." },
+    2: { icon: Shield, color: "text-blue-400", bgGradient: "from-blue-500/20 to-indigo-900/20", borderHover: "hover:border-blue-500/40", category: "Güvenlik", description: "Blockchain tabanlı, uçtan uca şifrelenmiş mesajlaşma uygulaması." },
+    3: { icon: Gamepad2, color: "text-orange-400", bgGradient: "from-orange-500/20 to-red-900/20", borderHover: "hover:border-orange-500/40", category: "Oyun", description: "Ultra gerçekçi Mars koloni sanal gerçeklik simülasyonu." },
+    4: { icon: Cpu, color: "text-purple-400", bgGradient: "from-purple-500/20 to-violet-900/20", borderHover: "hover:border-purple-500/40", category: "Teknoloji", description: "Beyin-bilgisayar arayüzü için açık kaynak SDK geliştirme." },
+    5: { icon: Heart, color: "text-pink-400", bgGradient: "from-pink-500/20 to-rose-900/20", borderHover: "hover:border-pink-500/40", category: "Sağlık", description: "Merkeziyetsiz tıbbi araştırma ve fonlama platformu." },
+    6: { icon: Globe, color: "text-cyan-400", bgGradient: "from-cyan-500/20 to-teal-900/20", borderHover: "hover:border-cyan-500/40", category: "Eğitim", description: "Blockchain teknolojisi eğitim ve sertifika platformu." },
 };
 
 // Varsayılan görsel (yeni kampanyalar için)
-const DEFAULT_VISUAL = { icon: Globe, color: "text-purple-400", bgGradient: "from-purple-500/20 to-violet-900/20", borderHover: "hover:border-purple-500/40", category: "Proje" };
+const DEFAULT_VISUAL = { icon: Globe, color: "text-purple-400", bgGradient: "from-purple-500/20 to-violet-900/20", borderHover: "hover:border-purple-500/40", category: "Proje", description: "Yenilikçi bir blockchain projesi." };
 
 interface ProjectGridProps {
     liveCampaigns?: CampaignData[];
@@ -88,6 +89,7 @@ export default function ProjectGrid({ liveCampaigns, isLoading, onDonationComple
     const [donatingId, setDonatingId] = useState<number | null>(null);
     const [donateAmounts, setDonateAmounts] = useState<Record<number, string>>({});
     const [donationSuccess, setDonationSuccess] = useState<number | null>(null);
+    const [showAllNotice, setShowAllNotice] = useState(false);
 
     // Kontrattan veri varsa onu kullan, yoksa mock data göster
     const useLiveData = liveCampaigns && liveCampaigns.length > 0;
@@ -161,6 +163,9 @@ export default function ProjectGrid({ liveCampaigns, isLoading, onDonationComple
                         {campaign.title}
                     </h3>
                     <p className="text-gray-400 text-sm leading-relaxed mb-4">
+                        {visual.description}
+                    </p>
+                    <p className="text-gray-500 text-xs mb-4 font-mono">
                         Yaratıcı: {campaign.creator.slice(0, 4)}...{campaign.creator.slice(-4)}
                     </p>
 
@@ -328,8 +333,23 @@ export default function ProjectGrid({ liveCampaigns, isLoading, onDonationComple
                             }
                         </p>
                     </div>
-                    <button className="flex items-center gap-2 text-white border border-white/10 px-6 py-3 rounded-xl hover:bg-white/5 transition-colors">
+                    <button
+                        onClick={() => {
+                            const totalCount = useLiveData ? liveCampaigns!.length : MOCK_PROJECTS.length;
+                            if (totalCount <= 6) {
+                                setShowAllNotice(true);
+                                setTimeout(() => setShowAllNotice(false), 3000);
+                            }
+                        }}
+                        className="flex items-center gap-2 text-white border border-white/10 px-6 py-3 rounded-xl hover:bg-white/5 transition-colors relative"
+                    >
                         Tümünü Gör <ArrowUpRight className="w-4 h-4" />
+                        {/* Uyarı baloncuğu */}
+                        {showAllNotice && (
+                            <span className="absolute -bottom-12 right-0 bg-white/10 backdrop-blur-xl text-gray-300 text-xs px-4 py-2 rounded-xl border border-white/10 whitespace-nowrap animate-pulse">
+                                Tüm kampanyalar zaten görüntüleniyor ✓
+                            </span>
+                        )}
                     </button>
                 </div>
 

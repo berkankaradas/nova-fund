@@ -18,6 +18,9 @@ const FREIGHTER_INSTALL_URL = "https://www.freighter.app/";
 // Desteklenen ağ (sadece Testnet)
 const REQUIRED_NETWORK = "TESTNET";
 
+// localStorage anahtarı — sayfa yenilemede cüzdan bağlantısını korumak için
+const STORAGE_KEY = "novafund_wallet_address";
+
 interface WalletContextType {
   address: string | null;           // Bağlı cüzdan adresi (G...)
   isWalletConnected: boolean;       // Cüzdan bağlı mı?
@@ -87,13 +90,32 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         const connected = await freighterIsConnected();
         setIsFreighterInstalled(!!connected);
 
-        if (!connected) return;
+        if (!connected) {
+          // Freighter yüklü değilse localStorage'ı temizle
+          localStorage.removeItem(STORAGE_KEY);
+          return;
+        }
 
         // Daha önce izin verilmiş mi?
         const allowed = await isAllowed();
         if (allowed) {
           const key = await retrievePublicKey();
-          if (key) setAddress(key);
+          if (key) {
+            setAddress(key);
+            localStorage.setItem(STORAGE_KEY, key);
+          }
+        } else {
+          // Kaydedilmiş adres varsa ve izin hâlâ geçerliyse yeniden bağlan
+          const saved = localStorage.getItem(STORAGE_KEY);
+          if (saved) {
+            const key = await retrievePublicKey();
+            if (key) {
+              setAddress(key);
+              localStorage.setItem(STORAGE_KEY, key);
+            } else {
+              localStorage.removeItem(STORAGE_KEY);
+            }
+          }
         }
 
         // Ağ kontrolü
@@ -144,6 +166,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
 
       if (finalAddress) {
         setAddress(finalAddress);
+        localStorage.setItem(STORAGE_KEY, finalAddress);
       }
 
       // Ağ doğrulaması
@@ -160,6 +183,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     setAddress(null);
     setNetworkName(null);
     setIsCorrectNetwork(false);
+    localStorage.removeItem(STORAGE_KEY);
   };
 
   return (
