@@ -4,18 +4,18 @@
 // KONTRAT SERVİS KATMANI — NovaFund
 // ============================================================
 //
-// Soroban RPC üzerinden kontrat fonksiyonlarını çağırır.
+// stellar-sdk v14.5 + Next.js 16 ESM bundler kombinasyonunda,
+// Server.prepareTransaction() ve Server.sendTransaction() içindeki
+// `instanceof Transaction` kontrolleri başarısız oluyor.
 //
-// ÖNEMLİ: stellar-sdk v14.5 + Next.js ESM bundler kombinasyonu
-// farklı Transaction sınıfı örnekleri oluşturur. Server.prepareTransaction()
-// ve Server.sendTransaction() dahili olarak `instanceof Transaction` kontrolü
-// yapar — bu kontrol ESM/CJS sınır çakışmasından başarısız olur.
+// ÇÖZÜM: simulateTransaction ve sendTransaction için doğrudan
+// JSON-RPC çağrıları kullanıyoruz. Bu yaklaşım SDK'nın sınıf
+// kontrollerini tamamen atlar.
 //
-// ÇÖZÜM: Her SDK metodu çağrısından önce TX'i XDR üzerinden
-// yeniden oluşturuyoruz (roundtrip):
-//   tx.toXDR() → TransactionBuilder.fromXDR(xdr, networkPassphrase)
-//
-// Bu, SDK'nın kendi modülündeki Transaction sınıfını kullanmasını garanti eder.
+// SDK sadece şunlar için kullanılır:
+//   - TransactionBuilder (TX oluşturma)
+//   - xdr.* (XDR parse/encode)
+//   - nativeToScVal / scValToBigInt (veri dönüşümü)
 // ============================================================
 
 import {
@@ -25,16 +25,13 @@ import {
     nativeToScVal,
     scValToBigInt,
     Address,
-    Networks,
     xdr,
 } from "@stellar/stellar-sdk";
-import { Server } from "@stellar/stellar-sdk/rpc";
 import { signTransaction } from "@stellar/freighter-api";
 import { CONTRACT_ID, RPC_URL, NETWORK_PASSPHRASE } from "../constants";
 
 // ─── SETUP ──────────────────────────────────────────────────
 
-const server = new Server(RPC_URL);
 const contract = new Contract(CONTRACT_ID);
 const VOID_PUBKEY = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
 
@@ -48,25 +45,35 @@ export interface CampaignData {
     raised: number;
 }
 
-// ─── ESM/CJS FIX ────────────────────────────────────────────
+// ─── RAW JSON-RPC ───────────────────────────────────────────
 
 /**
- * Transaction'ı XDR üzerinden yeniden oluşturur.
- * Bu, ESM/CJS sınıf uyumsuzluğunu çözer.
- *
- * Neden gerekli:
- * - Next.js ESM bundler, stellar-sdk'yı iki kez yükleyebilir
- * - build() tarafından dönen Transaction, Server modülündeki
- *   Transaction sınıfından farklı bir instance olur
- * - instanceof kontrolü başarısız → "expected a Transaction" hatası
- * - fromXDR() ise her zaman çağıran modülün Transaction'ını döner
+ * Soroban RPC'ye doğrudan JSON-RPC çağrısı yapar.
+ * SDK'nın Server sınıfını ve instanceof kontrollerini atlar.
  */
-function toCleanXDR(builtTx: any): string {
-    return builtTx.toXDR();
+async function rpc(method: string, params: Record<string, any> = {}): Promise<any> {
+    const res = await fetch(RPC_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+    });
+    const json = await res.json();
+    if (json.error) {
+        throw new Error(`RPC ${method} hatası: ${JSON.stringify(json.error)}`);
+    }
+    return json.result;
 }
 
-function fromCleanXDR(xdrString: string) {
-    return TransactionBuilder.fromXDR(xdrString, NETWORK_PASSPHRASE);
+/**
+ * Horizon API'den hesap bilgisi çeker.
+ */
+async function getHorizonAccount(address: string): Promise<Account> {
+    const res = await fetch(
+        `https://horizon-testnet.stellar.org/accounts/${address}`
+    );
+    if (!res.ok) throw new Error(`Hesap bulunamadı: ${address}`);
+    const data = await res.json();
+    return new Account(address, data.sequence);
 }
 
 // ─── OKUMA FONKSİYONLARI ────────────────────────────────────
@@ -75,7 +82,7 @@ export async function getAllCampaigns(): Promise<CampaignData[]> {
     try {
         const account = new Account(VOID_PUBKEY, "0");
 
-        const built = new TransactionBuilder(account, {
+        const tx = new TransactionBuilder(account, {
             fee: "100",
             networkPassphrase: NETWORK_PASSPHRASE,
         })
@@ -83,18 +90,19 @@ export async function getAllCampaigns(): Promise<CampaignData[]> {
             .setTimeout(30)
             .build();
 
-        // XDR roundtrip → fromXDR ile yeniden oluştur
-        const tx = fromCleanXDR(toCleanXDR(built));
+        // Raw RPC ile simüle et
+        const sim = await rpc("simulateTransaction", {
+            transaction: tx.toXDR(),
+        });
 
-        const response = await server.simulateTransaction(tx);
-
-        if ("error" in response) {
-            console.error("Simülasyon hatası:", response);
+        if (sim.error) {
+            console.error("Simülasyon hatası:", sim.error);
             return [];
         }
 
-        if (response.result) {
-            return parseCampaigns(response.result.retval);
+        if (sim.results && sim.results.length > 0) {
+            const retval = xdr.ScVal.fromXDR(sim.results[0].xdr, "base64");
+            return parseCampaigns(retval);
         }
 
         return [];
@@ -108,7 +116,7 @@ export async function getCampaign(campaignId: number): Promise<CampaignData | nu
     try {
         const account = new Account(VOID_PUBKEY, "0");
 
-        const built = new TransactionBuilder(account, {
+        const tx = new TransactionBuilder(account, {
             fee: "100",
             networkPassphrase: NETWORK_PASSPHRASE,
         })
@@ -118,12 +126,14 @@ export async function getCampaign(campaignId: number): Promise<CampaignData | nu
             .setTimeout(30)
             .build();
 
-        const tx = fromCleanXDR(toCleanXDR(built));
-        const response = await server.simulateTransaction(tx);
+        const sim = await rpc("simulateTransaction", {
+            transaction: tx.toXDR(),
+        });
 
-        if ("error" in response || !response.result) return null;
+        if (sim.error || !sim.results?.length) return null;
 
-        return parseSingleCampaign(response.result.retval);
+        const retval = xdr.ScVal.fromXDR(sim.results[0].xdr, "base64");
+        return parseSingleCampaign(retval);
     } catch (error) {
         console.error("Kampanya alınamadı:", error);
         return null;
@@ -141,7 +151,7 @@ export async function createCampaign(
         const account = await getHorizonAccount(creatorAddress);
         const targetStroops = BigInt(Math.round(targetXlm * 10_000_000));
 
-        const built = new TransactionBuilder(account, {
+        const tx = new TransactionBuilder(account, {
             fee: "1000000",
             networkPassphrase: NETWORK_PASSPHRASE,
         })
@@ -156,7 +166,7 @@ export async function createCampaign(
             .setTimeout(60)
             .build();
 
-        return await prepareSignSend(built);
+        return await simulateSignSend(tx);
     } catch (error) {
         console.error("Kampanya oluşturma hatası:", error);
         return false;
@@ -172,7 +182,7 @@ export async function donate(
         const account = await getHorizonAccount(donorAddress);
         const amountStroops = BigInt(Math.round(amountXlm * 10_000_000));
 
-        const built = new TransactionBuilder(account, {
+        const tx = new TransactionBuilder(account, {
             fee: "1000000",
             networkPassphrase: NETWORK_PASSPHRASE,
         })
@@ -187,89 +197,159 @@ export async function donate(
             .setTimeout(60)
             .build();
 
-        return await prepareSignSend(built);
+        return await simulateSignSend(tx);
     } catch (error) {
         console.error("Bağış hatası:", error);
         return false;
     }
 }
 
-// ─── ÇEKIRDEK AKIŞ: Prepare → Sign → Send ──────────────────
+// ─── ÇEKIRDEK: Simulate → Assemble → Sign → Send ───────────
 
 /**
- * Tam transaction akışı:
+ * Tam transaction akışı — SDK Server sınıfı KULLANILMAZ.
  *
- * 1. build()     → ham Transaction (ESM sınıfı, Server kabul etmez)
- * 2. toXDR()     → XDR string (sınıf bilgisi kaybolur)
- * 3. fromXDR()   → yeni Transaction (Server'ın modülüyle uyumlu)
- * 4. prepare()   → simülasyon + footprint ekleme → prepared TX
- * 5. toXDR()     → prepared XDR string (Freighter'a gönderilir)
- * 6. sign()      → Freighter popup → imzalı XDR string
- * 7. fromXDR()   → imzalı Transaction (Server'ın modülüyle uyumlu)
- * 8. send()      → ağa gönder → hash
- * 9. poll()      → onay bekle
+ * 1. TX'i XDR olarak simüle et (raw JSON-RPC)
+ * 2. Simülasyon sonuçlarıyla yeni TX oluştur (SorobanData + auth + fee)
+ * 3. Freighter ile XDR string olarak imzalat
+ * 4. İmzalı XDR'ı raw JSON-RPC ile gönder
+ * 5. İşlem onayını bekle (polling)
  */
-async function prepareSignSend(builtTx: any): Promise<boolean> {
-    // STEP 1-3: XDR roundtrip — Server'ın kabul edeceği Transaction oluştur
-    const cleanTx = fromCleanXDR(toCleanXDR(builtTx));
+async function simulateSignSend(originalTx: any): Promise<boolean> {
+    const originalXdr = originalTx.toXDR();
 
-    // STEP 4: Simüle + hazırla (footprint, auth, resource fee eklenir)
-    const prepared = await server.prepareTransaction(cleanTx);
+    // ── STEP 1: Simüle et ──
+    const sim = await rpc("simulateTransaction", {
+        transaction: originalXdr,
+    });
 
-    // STEP 5: Prepared TX'i XDR'a çevir
-    const preparedXdr = prepared.toXDR();
+    if (sim.error) {
+        console.error("Simülasyon başarısız:", sim.error);
+        return false;
+    }
 
-    // STEP 6: Freighter ile imzalat — sadece XDR string gönder
+    // ── STEP 2: Prepared TX oluştur ──
+    // Simülasyon sonuçlarından SorobanTransactionData al
+    const sorobanData = xdr.SorobanTransactionData.fromXDR(
+        sim.transactionData,
+        "base64"
+    );
+
+    // Auth entry'leri al
+    const authEntries: xdr.SorobanAuthorizationEntry[] = [];
+    if (sim.results?.[0]?.auth) {
+        for (const authXdr of sim.results[0].auth) {
+            authEntries.push(
+                xdr.SorobanAuthorizationEntry.fromXDR(authXdr, "base64")
+            );
+        }
+    }
+
+    // Minimum resource fee
+    const minResourceFee = parseInt(sim.minResourceFee || "0", 10);
+    const totalFee = (minResourceFee + 100000).toString(); // 0.01 XLM buffer
+
+    // Orijinal TX'in source account'unu yeniden çek (sequence güncel olsun)
+    const source = originalTx.source;
+    const account = await getHorizonAccount(source);
+
+    // Orijinal operation'ı al
+    const originalOp = xdr.Operation.fromXDR(
+        originalTx.operations[0].toXDR("base64"),
+        "base64"
+    );
+
+    // Auth'u operation'a ekle
+    if (authEntries.length > 0) {
+        const opBody = originalOp.body() as any;
+        if (opBody.switch().name === "invokeHostFunction") {
+            const invokeOp = opBody.invokeHostFunction();
+            // Yeni InvokeHostFunctionOp oluştur auth ile
+            const newInvokeOp = new xdr.InvokeHostFunctionOp({
+                hostFunction: invokeOp.hostFunction(),
+                auth: authEntries,
+            });
+            const newBody = xdr.OperationBody.invokeHostFunction(newInvokeOp);
+            // Yeni operation oluştur
+            const newOp = new xdr.Operation({
+                sourceAccount: originalOp.sourceAccount(),
+                body: newBody,
+            });
+
+            // Prepared TX'i oluştur
+            const preparedTx = new TransactionBuilder(account, {
+                fee: totalFee,
+                networkPassphrase: NETWORK_PASSPHRASE,
+            })
+                .addOperation(newOp)
+                .setSorobanData(sorobanData)
+                .setTimeout(60)
+                .build();
+
+            return await signAndSend(preparedTx);
+        }
+    }
+
+    // Auth yoksa direkt sorobanData ekle
+    const preparedTx = new TransactionBuilder(account, {
+        fee: totalFee,
+        networkPassphrase: NETWORK_PASSPHRASE,
+    })
+        .addOperation(originalOp)
+        .setSorobanData(sorobanData)
+        .setTimeout(60)
+        .build();
+
+    return await signAndSend(preparedTx);
+}
+
+/**
+ * Freighter ile imzala ve raw RPC ile gönder.
+ */
+async function signAndSend(preparedTx: any): Promise<boolean> {
+    // ── STEP 3: Freighter ile imzalat ──
+    const preparedXdr = preparedTx.toXDR();
+
     const signResult = await signTransaction(preparedXdr, {
         networkPassphrase: NETWORK_PASSPHRASE,
     });
 
-    // signTransaction response formatı: string veya { signedTxXdr: string }
-    const signedXdr = typeof signResult === "string"
-        ? signResult
-        : (signResult as any).signedTxXdr;
+    const signedXdr =
+        typeof signResult === "string"
+            ? signResult
+            : (signResult as any).signedTxXdr;
 
     if (!signedXdr) {
         console.error("İmzalama başarısız — XDR alınamadı");
         return false;
     }
 
-    // STEP 7: İmzalı XDR'dan Transaction oluştur (Server uyumlu)
-    const signedTx = fromCleanXDR(signedXdr);
+    // ── STEP 4: Raw RPC ile gönder ──
+    const sendResult = await rpc("sendTransaction", {
+        transaction: signedXdr,
+    });
 
-    // STEP 8: Ağa gönder
-    const sendResult = await server.sendTransaction(signedTx);
+    if (sendResult.status === "ERROR") {
+        console.error("Gönderme başarısız:", sendResult);
+        return false;
+    }
 
-    // STEP 9: Onay bekle
+    // ── STEP 5: Onay bekle ──
     return await waitForConfirmation(sendResult.hash);
 }
 
-// ─── YARDIMCI FONKSİYONLAR ─────────────────────────────────
-
 /**
- * Horizon API'den hesap bilgisi çeker.
- * Soroban RPC'nin getAccount'u bazen eksik dönebilir.
- */
-async function getHorizonAccount(address: string): Promise<Account> {
-    const res = await fetch(
-        `https://horizon-testnet.stellar.org/accounts/${address}`
-    );
-    if (!res.ok) throw new Error(`Hesap bulunamadı: ${address}`);
-    const data = await res.json();
-    return new Account(address, data.sequence);
-}
-
-/**
- * İşlemin onaylanmasını bekler (polling, max 30 saniye).
+ * İşlem onayını bekler (max 30 saniye polling).
  */
 async function waitForConfirmation(hash: string): Promise<boolean> {
     for (let i = 0; i < 30; i++) {
         try {
-            const result = await server.getTransaction(hash);
+            const result = await rpc("getTransaction", { hash });
             if (result.status === "SUCCESS") return true;
             if (result.status === "FAILED") return false;
+            // NOT_FOUND = henüz işlenmedi, tekrar dene
         } catch {
-            // İşlem henüz ledger'a yazılmadı
+            // RPC hatası, tekrar dene
         }
         await new Promise((r) => setTimeout(r, 1000));
     }
