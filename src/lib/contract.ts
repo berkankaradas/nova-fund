@@ -4,8 +4,8 @@
 // KONTRAT SERVİS KATMANI
 // ============================================================
 // Soroban RPC üzerinden kontrat fonksiyonlarını çağırır.
-// get_all_campaigns → simulateTransaction (view)
-// create_campaign / donate → Freighter ile imzalama gerektirir
+// SDK v14.5 ESM uyumluluğu için XDR roundtrip yaklaşımı:
+//   build() → toXDR() → fromXDR() → Server'a gönder
 // ============================================================
 
 import {
@@ -16,8 +16,9 @@ import {
     scValToBigInt,
     Address,
     xdr,
+    Transaction,
 } from "@stellar/stellar-sdk";
-import { Server, Api } from "@stellar/stellar-sdk/rpc";
+import { Server } from "@stellar/stellar-sdk/rpc";
 import { signTransaction } from "@stellar/freighter-api";
 import { CONTRACT_ID, RPC_URL, NETWORK_PASSPHRASE } from "../constants";
 
@@ -32,13 +33,34 @@ const VOID_PUBKEY = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
 
 // ─── TİPLER ─────────────────────────────────────────────────
 
-// Frontend'te kullanılan kampanya veri yapısı
 export interface CampaignData {
     id: number;
     creator: string;
     title: string;
-    target: number;  // XLM cinsinden (stroop'tan dönüştürülmüş)
+    target: number;  // XLM cinsinden
     raised: number;  // XLM cinsinden
+}
+
+// ─── YARDIMCI ───────────────────────────────────────────────
+
+/**
+ * ESM/CJS sınıf uyumsuzluğunu çözmek için TX'i XDR üzerinden yeniden oluşturur.
+ * build() → toXDR() → fromXDR() → prepareTransaction'ın kabul ettiği tip.
+ */
+function rebuildTx(tx: Transaction): Transaction {
+    return TransactionBuilder.fromXDR(tx.toXDR(), NETWORK_PASSPHRASE) as Transaction;
+}
+
+/**
+ * Horizon API'den hesap bilgisi çeker (Soroban RPC'den daha güvenilir).
+ */
+async function getAccount(address: string): Promise<Account> {
+    const res = await fetch(
+        `https://horizon-testnet.stellar.org/accounts/${address}`
+    );
+    if (!res.ok) throw new Error(`Hesap bulunamadı: ${address}`);
+    const data = await res.json();
+    return new Account(address, data.sequence);
 }
 
 // ─── OKUMA FONKSİYONLARI (View — imza gerektirmez) ──────────
@@ -59,10 +81,16 @@ export async function getAllCampaigns(): Promise<CampaignData[]> {
             .setTimeout(30)
             .build();
 
-        // Simüle et (chain'e göndermeden sonucu al)
-        const response = await server.simulateTransaction(tx);
+        // XDR roundtrip → simülasyon
+        const response = await server.simulateTransaction(rebuildTx(tx));
 
-        if (Api.isSimulationSuccess(response) && response.result) {
+        if ("error" in response) {
+            console.error("Simülasyon hatası:", response);
+            return [];
+        }
+
+        // Sonuçtan kampanya verilerini parse et
+        if (response.result) {
             return parseCampaigns(response.result.retval);
         }
 
@@ -90,13 +118,11 @@ export async function getCampaign(campaignId: number): Promise<CampaignData | nu
             .setTimeout(30)
             .build();
 
-        const response = await server.simulateTransaction(tx);
+        const response = await server.simulateTransaction(rebuildTx(tx));
 
-        if (Api.isSimulationSuccess(response) && response.result) {
-            return parseSingleCampaign(response.result.retval);
-        }
+        if ("error" in response || !response.result) return null;
 
-        return null;
+        return parseSingleCampaign(response.result.retval);
     } catch (error) {
         console.error("Kampanya alınamadı:", error);
         return null;
@@ -107,7 +133,6 @@ export async function getCampaign(campaignId: number): Promise<CampaignData | nu
 
 /**
  * Yeni kampanya oluşturur.
- * Freighter ile imzalanır ve testnet'e gönderilir.
  */
 export async function createCampaign(
     creatorAddress: string,
@@ -115,9 +140,7 @@ export async function createCampaign(
     targetXlm: number
 ): Promise<boolean> {
     try {
-        const account = await server.getAccount(creatorAddress);
-
-        // Hedefi stroop'a çevir (1 XLM = 10^7 stroop)
+        const account = await getAccount(creatorAddress);
         const targetStroops = BigInt(Math.round(targetXlm * 10_000_000));
 
         const tx = new TransactionBuilder(account, {
@@ -135,19 +158,21 @@ export async function createCampaign(
             .setTimeout(60)
             .build();
 
-        // Hazırla (simulate + assemble) → imzalat → gönder
-        const prepared = await server.prepareTransaction(tx);
+        // Simüle → hazırla → imzalat → gönder
+        const prepared = await server.prepareTransaction(rebuildTx(tx));
 
         const signedXdr = await signTransaction(prepared.toXDR(), {
             networkPassphrase: NETWORK_PASSPHRASE,
         });
 
-        const signedTx = TransactionBuilder.fromXDR(
-            typeof signedXdr === "string" ? signedXdr : (signedXdr as any).signedTxXdr,
-            NETWORK_PASSPHRASE
+        const finalXdr = typeof signedXdr === "string"
+            ? signedXdr
+            : (signedXdr as any).signedTxXdr;
+
+        const result = await server.sendTransaction(
+            TransactionBuilder.fromXDR(finalXdr, NETWORK_PASSPHRASE) as Transaction
         );
 
-        const result = await server.sendTransaction(signedTx);
         return await waitForTx(result.hash);
     } catch (error) {
         console.error("Kampanya oluşturma hatası:", error);
@@ -157,7 +182,6 @@ export async function createCampaign(
 
 /**
  * Bir kampanyaya bağış yapar.
- * Freighter ile imzalanır ve testnet'e gönderilir.
  */
 export async function donate(
     campaignId: number,
@@ -165,8 +189,7 @@ export async function donate(
     amountXlm: number
 ): Promise<boolean> {
     try {
-        const account = await server.getAccount(donorAddress);
-
+        const account = await getAccount(donorAddress);
         const amountStroops = BigInt(Math.round(amountXlm * 10_000_000));
 
         const tx = new TransactionBuilder(account, {
@@ -184,19 +207,21 @@ export async function donate(
             .setTimeout(60)
             .build();
 
-        // Hazırla (simulate + assemble) → imzalat → gönder
-        const prepared = await server.prepareTransaction(tx);
+        // Simüle → hazırla → imzalat → gönder
+        const prepared = await server.prepareTransaction(rebuildTx(tx));
 
         const signedXdr = await signTransaction(prepared.toXDR(), {
             networkPassphrase: NETWORK_PASSPHRASE,
         });
 
-        const signedTx = TransactionBuilder.fromXDR(
-            typeof signedXdr === "string" ? signedXdr : (signedXdr as any).signedTxXdr,
-            NETWORK_PASSPHRASE
+        const finalXdr = typeof signedXdr === "string"
+            ? signedXdr
+            : (signedXdr as any).signedTxXdr;
+
+        const result = await server.sendTransaction(
+            TransactionBuilder.fromXDR(finalXdr, NETWORK_PASSPHRASE) as Transaction
         );
 
-        const result = await server.sendTransaction(signedTx);
         return await waitForTx(result.hash);
     } catch (error) {
         console.error("Bağış hatası:", error);
@@ -216,21 +241,19 @@ async function waitForTx(hash: string): Promise<boolean> {
             if (result.status === "SUCCESS") return true;
             if (result.status === "FAILED") return false;
         } catch {
-            // İşlem henüz işlenmedi, tekrar dene
+            // İşlem henüz işlenmedi
         }
         await new Promise((r) => setTimeout(r, 1000));
     }
     return false;
 }
 
-/**
- * ScVal Vec<Campaign> → CampaignData[] dönüştürücüsü.
- */
+// ─── PARSE FONKSİYONLARI ────────────────────────────────────
+
 function parseCampaigns(scVal: xdr.ScVal): CampaignData[] {
     try {
         const vec = scVal.vec();
         if (!vec) return [];
-
         return vec
             .map((item) => parseSingleCampaign(item))
             .filter((c): c is CampaignData => c !== null);
@@ -240,15 +263,11 @@ function parseCampaigns(scVal: xdr.ScVal): CampaignData[] {
     }
 }
 
-/**
- * Tek bir ScVal Campaign struct → CampaignData dönüştürücüsü.
- */
 function parseSingleCampaign(scVal: xdr.ScVal): CampaignData | null {
     try {
         const fields = scVal.map();
         if (!fields) return null;
 
-        // Map entry'lerinden alanları oku
         const get = (key: string): xdr.ScVal | undefined => {
             const entry = fields.find(
                 (e) => e.key().sym()?.toString() === key
@@ -262,9 +281,7 @@ function parseSingleCampaign(scVal: xdr.ScVal): CampaignData | null {
         const targetVal = get("target");
         const raisedVal = get("raised");
 
-        if (!idVal || !creatorVal || !titleVal || !targetVal || !raisedVal) {
-            return null;
-        }
+        if (!idVal || !creatorVal || !titleVal || !targetVal || !raisedVal) return null;
 
         return {
             id: idVal.u32() ?? 0,
