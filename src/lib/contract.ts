@@ -253,11 +253,11 @@ async function simulateSignSend(originalTx: any): Promise<boolean> {
     const source = originalTx.source;
     const account = await getHorizonAccount(source);
 
-    // Orijinal operation'ı al
-    const originalOp = xdr.Operation.fromXDR(
-        originalTx.operations[0].toXDR("base64"),
-        "base64"
-    );
+    // Orijinal operation'ı XDR envelope'dan al
+    // (tx.operations[0] high-level JS objesi, toXDR yok — envelope'dan çekmek gerekir)
+    const envelope = xdr.TransactionEnvelope.fromXDR(originalXdr, "base64");
+    const txBody = envelope.v1().tx();
+    const originalOp = txBody.operations()[0];
 
     // Auth'u operation'a ekle
     if (authEntries.length > 0) {
